@@ -51,6 +51,73 @@ class AnalyzerTests(unittest.TestCase):
         finally:
             analyzer.close()
 
+    def _write_other_session(self):
+        lines = [
+            event("2026-08-11T10:00:00Z", "session_meta", {"id": "session-2", "timestamp": "2026-08-11T10:00:00Z", "cwd": "D:\\projects\\other"}),
+            event("2026-08-11T10:00:01Z", "event_msg", {"type": "task_started", "turn_id": "turn-o1"}),
+            event("2026-08-11T10:00:02Z", "event_msg", {"type": "user_message", "message": "分析一下日志格式"}),
+            event("2026-08-11T10:00:03Z", "event_msg", {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 80, "cached_input_tokens": 0, "output_tokens": 15, "reasoning_output_tokens": 5, "total_tokens": 100}}}),
+            event("2026-08-11T10:00:04Z", "event_msg", {"type": "agent_message", "phase": "final", "message": "建议将日志改为结构化输出。"}),
+            event("2026-08-11T10:00:05Z", "event_msg", {"type": "task_complete", "turn_id": "turn-o1"}),
+        ]
+        (self.sessions / "rollout-other.jsonl").write_text("".join(lines), encoding="utf-8")
+
+    def test_materialize_excludes_configured_projects_and_recovers(self):
+        self._write_other_session()
+        config = self.root / "data" / "excluded_projects.json"
+        analyzer = SessionAnalyzer(self.db, self.output, excluded_file=config)
+        try:
+            analyzer.scan([self.root / "sessions"])
+            baseline = json.loads((self.output / "dashboard.json").read_text(encoding="utf-8"))
+            self.assertEqual({p["name"] for p in baseline["projects"]}, {"demo", "other"})
+            baseline_daily = {d["date"]: d for d in baseline["daily"]}
+            demo_before = next(p for p in baseline["projects"] if p["name"] == "demo")
+
+            config.write_text(json.dumps({"version": 1, "updated_at": "t", "excluded": ["other"]}), encoding="utf-8")
+            # 生产语义等价：scan 在有事件变更时会重读名单再物化；此处无新事件，
+            # 直接重读名单并物化以验证同一行为。
+            analyzer.excluded_projects = analyzer._load_excluded()
+            analyzer.materialize_dashboard()
+            excluded_dash = json.loads((self.output / "dashboard.json").read_text(encoding="utf-8"))
+            self.assertEqual({p["name"] for p in excluded_dash["projects"]}, {"demo"})
+            self.assertEqual(excluded_dash["kpis"]["issues"], baseline["kpis"]["issues"] - 1)
+            self.assertEqual(excluded_dash["kpis"]["total_tokens"], baseline["kpis"]["total_tokens"] - 100)
+            self.assertTrue(all(i["project"] != "other" for i in excluded_dash["issues"]))
+            self.assertTrue(all(s["project"] != "other" for s in excluded_dash["sessions"]))
+            daily = {d["date"]: d for d in excluded_dash["daily"]}
+            self.assertEqual(set(daily), set(baseline_daily))
+            self.assertEqual(daily["2026-08-11"]["tokens"], baseline_daily["2026-08-11"]["tokens"] - 100)
+            demo_after = next(p for p in excluded_dash["projects"] if p["name"] == "demo")
+            self.assertEqual(demo_before, demo_after)
+            self.assertFalse((self.output / "sessions" / "session-2.json").exists())
+            self.assertTrue((self.output / "sessions" / "session-1.json").exists())
+
+            config.unlink()
+            analyzer.excluded_projects = analyzer._load_excluded()
+            analyzer.materialize_dashboard()
+            restored = json.loads((self.output / "dashboard.json").read_text(encoding="utf-8"))
+            self.assertEqual({p["name"] for p in restored["projects"]}, {"demo", "other"})
+            self.assertEqual(restored["kpis"], baseline["kpis"])
+        finally:
+            analyzer.close()
+
+    def test_materialize_with_empty_list_matches_baseline(self):
+        self._write_other_session()
+        config = self.root / "data" / "excluded_projects.json"
+        analyzer = SessionAnalyzer(self.db, self.output, excluded_file=config)
+        try:
+            analyzer.scan([self.root / "sessions"])
+            baseline = json.loads((self.output / "dashboard.json").read_text(encoding="utf-8"))
+            config.write_text(json.dumps({"version": 1, "updated_at": "t", "excluded": []}), encoding="utf-8")
+            analyzer.materialize_dashboard()
+            again = json.loads((self.output / "dashboard.json").read_text(encoding="utf-8"))
+            self.assertEqual(again["kpis"], baseline["kpis"])
+            self.assertEqual(again["projects"], baseline["projects"])
+            self.assertEqual(again["issues"], baseline["issues"])
+            self.assertEqual(again["sessions"], baseline["sessions"])
+        finally:
+            analyzer.close()
+
     def test_incremental_cross_day_and_cost_attribution(self):
         analyzer = SessionAnalyzer(self.db, self.output)
         try:

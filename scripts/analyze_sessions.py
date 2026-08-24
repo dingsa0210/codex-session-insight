@@ -198,6 +198,13 @@ class SessionAnalyzer:
             print(f"[warn] 排除名单读取失败，按空名单处理: {exc}", file=sys.stderr)
             return set()
 
+    def _exclude_clause(self) -> tuple[str, list[str]]:
+        excluded = sorted(self.excluded_projects)
+        if not excluded:
+            return "", []
+        placeholders = ",".join("?" for _ in excluded)
+        return f" AND project NOT IN ({placeholders})", excluded
+
     def _init_schema(self) -> None:
         self.conn.executescript(
             """
@@ -352,6 +359,7 @@ class SessionAnalyzer:
             "INSERT INTO scan_runs(started_at, source_root) VALUES(?, ?)", (started, root_label)
         )
         run_id = cursor.lastrowid
+        self.excluded_projects = self._load_excluded()
         result = ScanResult()
         paths: list[Path] = []
         for root in source_roots:
@@ -758,8 +766,9 @@ class SessionAnalyzer:
                 previous_issue = {"id": issue_id, "root_id": root_id}
 
     def materialize_dashboard(self, write_session_ids: set[str] | None = None) -> dict[str, Any]:
-        issues = [dict(row) for row in self.conn.execute("SELECT * FROM issues ORDER BY updated_at DESC").fetchall()]
-        sessions = [dict(row) for row in self.conn.execute("SELECT * FROM sessions ORDER BY last_event_at DESC").fetchall()]
+        clause, params = self._exclude_clause()
+        issues = [dict(row) for row in self.conn.execute("SELECT * FROM issues WHERE 1=1" + clause + " ORDER BY updated_at DESC", params).fetchall()]
+        sessions = [dict(row) for row in self.conn.execute("SELECT * FROM sessions WHERE 1=1" + clause + " ORDER BY last_event_at DESC", params).fetchall()]
         for issue in issues:
             issue["changed_files"] = json.loads(issue.get("changed_files") or "[]")
             issue["solution_preview"] = compact_text(issue.get("solution"), 260)
@@ -769,7 +778,7 @@ class SessionAnalyzer:
             issue.pop("prompt", None)
         today = datetime.now(self.tz).date().isoformat()
         day_rows: dict[str, dict[str, Any]] = defaultdict(lambda: {"sessions": set(), "issues": 0, "tokens": 0, "wall_seconds": 0.0, "accepted": 0})
-        for row in self.conn.execute("SELECT local_date,session_id,total_tokens,wall_seconds,acceptance FROM issues WHERE local_date IS NOT NULL"):
+        for row in self.conn.execute("SELECT local_date,session_id,total_tokens,wall_seconds,acceptance FROM issues WHERE local_date IS NOT NULL" + clause, params):
             day = day_rows[row["local_date"]]
             day["sessions"].add(row["session_id"])
             day["issues"] += 1
@@ -781,7 +790,7 @@ class SessionAnalyzer:
             item = day_rows[date]
             daily.append({"date": date, "sessions": len(item["sessions"]), "issues": item["issues"], "tokens": item["tokens"], "wall_seconds": round(item["wall_seconds"], 1), "accepted": item["accepted"]})
         project_rows: dict[str, dict[str, Any]] = defaultdict(lambda: {"sessions": set(), "issues": 0, "bugs": 0, "resolved": 0, "accepted": 0, "tokens": 0, "wall_seconds": 0.0, "last_activity": None})
-        for row in self.conn.execute("SELECT project,session_id,type,status,acceptance,total_tokens,wall_seconds,updated_at FROM issues"):
+        for row in self.conn.execute("SELECT project,session_id,type,status,acceptance,total_tokens,wall_seconds,updated_at FROM issues WHERE 1=1" + clause, params):
             project = project_rows[row["project"]]
             project["sessions"].add(row["session_id"])
             project["issues"] += 1
@@ -837,6 +846,13 @@ class SessionAnalyzer:
         dashboard_path.write_text(json.dumps(dashboard, ensure_ascii=False, indent=2), encoding="utf-8")
         session_dir = self.output_dir / "sessions"
         session_dir.mkdir(parents=True, exist_ok=True)
+        if self.excluded_projects:
+            # 名单变更后移除历史遗留的详情文件，避免被排除会话继续通过静态目录暴露。
+            placeholders = ",".join("?" for _ in self.excluded_projects)
+            excluded_ids = [row["id"] for row in self.conn.execute(
+                f"SELECT id FROM sessions WHERE project IN ({placeholders})", sorted(self.excluded_projects))]
+            for session_id in excluded_ids:
+                (session_dir / f"{session_id}.json").unlink(missing_ok=True)
         for session in sessions:
             if write_session_ids is None or session["id"] in write_session_ids:
                 messages = [dict(r) for r in self.conn.execute("SELECT timestamp,turn_id,role,phase,content FROM messages WHERE session_id=? ORDER BY timestamp", (session["id"],))]
