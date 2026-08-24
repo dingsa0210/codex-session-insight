@@ -14,7 +14,15 @@
 
 ## 快速开始
 
-在 PowerShell 中运行：
+依赖：Node.js ≥ 22.13、Python ≥ 3.10。首次使用先安装前端依赖：
+
+```bash
+npm ci --no-audit --no-fund
+```
+
+项目可在 Windows、macOS、Linux 上运行；`scripts/*.ps1` 是 Windows 专用包装脚本，其余部分完全跨平台。
+
+### Windows（PowerShell）
 
 ```powershell
 cd D:\projects\codex-session-insight
@@ -30,13 +38,33 @@ npm run dev
 powershell -ExecutionPolicy Bypass -File scripts\update-dashboard.ps1 -WatchSeconds 60
 ```
 
-安装 Windows 后台计划任务（默认每 10 分钟）：
+### macOS / Linux
+
+扫描器为纯标准库 Python，直接运行；会话目录默认 `~/.codex/sessions`，可用环境变量 `CODEX_SESSIONS_DIR` 或 `--sessions-dir`（可重复传入多个根目录，跨机器数据合并统计）覆盖：
+
+```bash
+python3 scripts/analyze_sessions.py             # 单次增量扫描
+python3 scripts/analyze_sessions.py --watch 60  # 每 60 秒监听
+npm run dev
+```
+
+打开 `http://localhost:3000`。
+
+### 后台定时扫描
+
+Windows 计划任务（默认每 10 分钟）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install-scheduled-task.ps1 -IntervalMinutes 10
 ```
 
 该命令会变更 Windows 计划任务；当前项目不会自动替用户安装。
+
+macOS / Linux 用 cron 实现同样效果（示例为每 10 分钟）：
+
+```bash
+*/10 * * * * cd /path/to/codex-session-insight && python3 scripts/analyze_sessions.py >> data/scan.log 2>&1
+```
 
 ## 数据流
 
@@ -68,9 +96,9 @@ scripts/analyze_sessions.py
 
 ## 检查
 
-```powershell
-python -m unittest tests.test_analyzer
-npm run build
+```bash
+python3 -m unittest tests.test_analyzer   # Windows 下用 python
+npm test
 ```
 
 分析数据库和会话内容属于敏感本地数据。项目默认只在本机运行，没有部署到公网，也没有上传历史会话。
