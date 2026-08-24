@@ -75,7 +75,7 @@ export default function Home() {
   }, [dashboard, query, project, acceptance]);
 
   if (!data && !error) return <Skeleton />;
-  if (!dashboard) return <main className="loading"><h1>暂无分析数据</h1><p>请先运行 scripts/update-dashboard.ps1。</p><code>{error}</code></main>;
+  if (!data || !dashboard) return <main className="loading"><h1>暂无分析数据</h1><p>请先运行 scripts/update-dashboard.ps1。</p><code>{error}</code></main>;
 
   const projects = ["全部项目", ...dashboard.projects.map((item) => item.name)];
   const recentDays = dashboard.daily.slice(-14);
@@ -90,6 +90,23 @@ export default function Home() {
       setSessionDetail(await response.json());
     } finally {
       setSessionLoading(false);
+    }
+  };
+  const toggleExcluded = (name: string) => setExcluded((list) => list.includes(name) ? list.filter((item) => item !== name) : [...list, name]);
+  const saveExclusions = async () => {
+    setSaving(true);
+    setSaveNotice("");
+    try {
+      const response = await fetch("/api/exclusions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ excluded }) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      const saved = Array.isArray(payload.excluded) ? payload.excluded : excluded;
+      setExcluded(saved);
+      setSaveNotice(`已保存 ${saved.length} 项`);
+    } catch (reason) {
+      setSaveNotice(`保存失败：${reason}`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -128,7 +145,7 @@ export default function Home() {
         {view === "sessions" && <section className="panel session-panel"><div className="panel-title"><div><h2>会话生命周期</h2><p>会话按最后活动更新，跨日会话不会在创建日提前关闭；点击查看完整对话</p></div>{sessionLoading && <span className="inline-loading">正在读取…</span>}</div><div className="session-list">{dashboard.sessions.map((session) => <button className="session-row" key={session.id} onClick={() => openSession(session)}><div className="session-state"><i className={session.spans_days ? "spanning" : ""}/></div><div className="session-main"><h3>{session.title || "未命名会话"}</h3><p>{session.project} · {session.git_branch || "无 Git 分支"}</p><code>{session.id}</code></div><div className="session-meta"><span>{session.issue_count} 项问题</span><span>{formatNumber(session.tokens)} Token</span><span>{session.created_day} → {session.last_day}</span>{session.spans_days && <b>跨日</b>}<Icon name="chevron"/></div></button>)}</div></section>}
 
         {view === "cost" && <section className="cost-layout"><article className="panel"><div className="panel-title"><div><h2>高成本问题 Top 8</h2><p>问题级 Token、墙钟耗时与活跃耗时</p></div></div><div className="cost-list">{topCost.map((item, index) => <button key={item.id} onClick={() => setSelectedIssue(item)}><em>{String(index + 1).padStart(2, "0")}</em><div><b>{item.title}</b><span>{item.project} · {item.id}</span></div><strong>{formatNumber(item.total_tokens)}</strong><small>{formatDuration(item.wall_seconds)}</small></button>)}</div></article><article className="panel cost-note"><h2>成本口径</h2><dl><dt>Token</dt><dd>Codex token_count 的 last_token_usage 按 turn 累加，包含缓存输入。</dd><dt>墙钟耗时</dt><dd>从 task_started 到 task_complete/turn_aborted；开放 turn 截止最后消息。</dd><dt>活跃耗时</dt><dd>相邻事件间隔最多计 5 分钟，降低长时间离席造成的偏差。</dd><dt>问题归属</dt><dd>每个用户 turn 为一个问题单元；短跟进可关联到上一问题根节点。</dd></dl></article></section>}
-        {view === "settings" && <section className="panel settings-panel"><div className="panel-title"><div><h2>统计排除配置</h2><p>加载中…</p></div></div></section>}
+        {view === "settings" && <SettingsView knownProjects={data.projects} excluded={excluded} apiAvailable={apiAvailable} saving={saving} saveNotice={saveNotice} onToggle={toggleExcluded} onSave={saveExclusions}/>}
       </main>
     </div>
 
@@ -153,4 +170,31 @@ function SessionDrawer({ detail, onClose }: { detail: Record<string, any>; onClo
   const session = detail.session || {};
   const messages = detail.messages || [];
   return <div className="drawer-backdrop" onMouseDown={onClose}><aside className="drawer session-drawer" onMouseDown={(e) => e.stopPropagation()}><button className="drawer-close" onClick={onClose}>×</button><div className="drawer-kicker">会话证据 · {session.project}</div><h2>{session.title || "未命名会话"}</h2><div className="session-facts"><span>{messages.length} 条消息</span><span>{formatDate(session.first_event_at)} → {formatDate(session.last_event_at)}</span><code>{session.id}</code></div><div className="transcript">{messages.map((message: Record<string, any>, index: number) => <article className={`message message-${message.role}`} key={`${message.timestamp}-${index}`}><header><b>{message.role === "user" ? "用户" : "Codex"}</b><time>{formatDate(message.timestamp)}</time>{message.phase && <span>{message.phase}</span>}</header><pre>{message.content}</pre></article>)}</div></aside></div>;
+}
+
+function SettingsView({ knownProjects, excluded, apiAvailable, saving, saveNotice, onToggle, onSave }: {
+  knownProjects: Dashboard["projects"];
+  excluded: string[];
+  apiAvailable: boolean;
+  saving: boolean;
+  saveNotice: string;
+  onToggle: (name: string) => void;
+  onSave: () => void;
+}) {
+  const meta = new Map(knownProjects.map((item) => [item.name, item]));
+  const names = [...new Set([...knownProjects.map((item) => item.name), ...excluded])];
+  return <section className="panel settings-panel">
+    <div className="panel-title"><div><h2>统计排除配置</h2><p>勾选以排除该项目：不进入任何统计，原始证据完整保留，可随时恢复；聚合层数字在下次扫描后完全同步。</p></div></div>
+    {!apiAvailable && <p className="empty">配置接口不可用：仅在 npm run dev 模式下可读写名单。</p>}
+    <div className="settings-list">{names.map((name) => {
+      const item = meta.get(name);
+      const isExcluded = excluded.includes(name);
+      return <label className="settings-row" key={name}>
+        <input type="checkbox" checked={isExcluded} onChange={() => onToggle(name)}/>
+        <span className="settings-main"><b>{name}</b><small>{item ? `${item.sessions} 个会话 · ${formatNumber(item.tokens)} Token` : "当前数据中无此项目（历史条目）"}</small></span>
+        <span className="badge">{isExcluded ? "已排除" : "统计中"}</span>
+      </label>;
+    })}{!names.length && <div className="empty">暂无项目</div>}</div>
+    <div className="settings-foot"><button onClick={onSave} disabled={saving}>{saving ? "保存中…" : "保存配置"}</button>{saveNotice && <small>{saveNotice}</small>}</div>
+  </section>;
 }
