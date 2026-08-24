@@ -198,7 +198,12 @@ class SessionAnalyzer:
             print(f"[warn] 排除名单读取失败，按空名单处理: {exc}", file=sys.stderr)
             return set()
 
+    def _stored_excluded_snapshot(self) -> str | None:
+        row = self.conn.execute("SELECT value FROM metadata WHERE key='materialized_excluded'").fetchone()
+        return row["value"] if row else None
+
     def _exclude_clause(self) -> tuple[str, list[str]]:
+        excluded = sorted(self.excluded_projects)
         excluded = sorted(self.excluded_projects)
         if not excluded:
             return "", []
@@ -399,8 +404,11 @@ class SessionAnalyzer:
         # Live sessions append token/tool chatter continuously. Rebuilding every
         # model for each tiny append is expensive, so only changed turns are
         # recomputed and the dashboard snapshot is refreshed from materialized
-        # rows.
-        needs_rebuild = bool(result.events_added or full or not (self.output_dir / "dashboard.json").exists())
+        # rows. A changed exclusion list also forces a refresh even when no
+        # session bytes moved.
+        stored_excluded = self._stored_excluded_snapshot()
+        excluded_changed = stored_excluded is not None and stored_excluded != json_dump(sorted(self.excluded_projects))
+        needs_rebuild = bool(result.events_added or full or not (self.output_dir / "dashboard.json").exists() or excluded_changed)
         if needs_rebuild:
             changed_turns = sorted(result.changed_turns) if result.events_added and not full else None
             self._rebuild_models(changed_turns)
@@ -844,6 +852,12 @@ class SessionAnalyzer:
         }
         dashboard_path = self.output_dir / "dashboard.json"
         dashboard_path.write_text(json.dumps(dashboard, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.conn.execute(
+            "INSERT INTO metadata(key, value) VALUES('materialized_excluded', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (json_dump(sorted(self.excluded_projects)),),
+        )
+        self.conn.commit()
         session_dir = self.output_dir / "sessions"
         session_dir.mkdir(parents=True, exist_ok=True)
         if self.excluded_projects:
@@ -875,6 +889,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=project_root / "data" / "codex_insights.db")
     parser.add_argument("--output", type=Path, default=project_root / "public" / "data")
     parser.add_argument("--timezone", default="Asia/Shanghai")
+    parser.add_argument("--excluded-file", type=Path, default=None, help="Exclusion list JSON; defaults to <project>/data/excluded_projects.json")
     parser.add_argument("--full", action="store_true", help="Re-index every source file")
     parser.add_argument("--watch", type=int, metavar="SECONDS", help="Keep scanning at this interval")
     return parser.parse_args()
@@ -883,7 +898,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     roots = args.sessions_dir or [default_sessions_dir()]
-    analyzer = SessionAnalyzer(args.db, args.output, args.timezone)
+    analyzer = SessionAnalyzer(args.db, args.output, args.timezone, args.excluded_file)
     try:
         while True:
             started = time.monotonic()

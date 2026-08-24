@@ -74,10 +74,8 @@ class AnalyzerTests(unittest.TestCase):
             demo_before = next(p for p in baseline["projects"] if p["name"] == "demo")
 
             config.write_text(json.dumps({"version": 1, "updated_at": "t", "excluded": ["other"]}), encoding="utf-8")
-            # 生产语义等价：scan 在有事件变更时会重读名单再物化；此处无新事件，
-            # 直接重读名单并物化以验证同一行为。
-            analyzer.excluded_projects = analyzer._load_excluded()
-            analyzer.materialize_dashboard()
+            # 无新增事件时 scan 也必须因名单变更而重新物化（watch 模式承诺）。
+            analyzer.scan([self.root / "sessions"])
             excluded_dash = json.loads((self.output / "dashboard.json").read_text(encoding="utf-8"))
             self.assertEqual({p["name"] for p in excluded_dash["projects"]}, {"demo"})
             self.assertEqual(excluded_dash["kpis"]["issues"], baseline["kpis"]["issues"] - 1)
@@ -93,8 +91,7 @@ class AnalyzerTests(unittest.TestCase):
             self.assertTrue((self.output / "sessions" / "session-1.json").exists())
 
             config.unlink()
-            analyzer.excluded_projects = analyzer._load_excluded()
-            analyzer.materialize_dashboard()
+            analyzer.scan([self.root / "sessions"])
             restored = json.loads((self.output / "dashboard.json").read_text(encoding="utf-8"))
             self.assertEqual({p["name"] for p in restored["projects"]}, {"demo", "other"})
             self.assertEqual(restored["kpis"], baseline["kpis"])
@@ -109,7 +106,7 @@ class AnalyzerTests(unittest.TestCase):
             analyzer.scan([self.root / "sessions"])
             baseline = json.loads((self.output / "dashboard.json").read_text(encoding="utf-8"))
             config.write_text(json.dumps({"version": 1, "updated_at": "t", "excluded": []}), encoding="utf-8")
-            analyzer.materialize_dashboard()
+            analyzer.scan([self.root / "sessions"])
             again = json.loads((self.output / "dashboard.json").read_text(encoding="utf-8"))
             self.assertEqual(again["kpis"], baseline["kpis"])
             self.assertEqual(again["projects"], baseline["projects"])
